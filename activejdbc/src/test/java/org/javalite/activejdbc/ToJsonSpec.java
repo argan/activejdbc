@@ -17,10 +17,12 @@ limitations under the License.
 package org.javalite.activejdbc;
 
 
-import com.fasterxml.jackson.databind.JsonNode;
+
 import com.fasterxml.jackson.databind.util.ISO8601DateFormat;
 import org.javalite.activejdbc.test.ActiveJDBCTest;
 import org.javalite.activejdbc.test_models.*;
+import org.javalite.common.JsonHelper;
+import org.javalite.common.Util;
 import org.junit.Test;
 
 import java.text.ParseException;
@@ -89,7 +91,7 @@ public class ToJsonSpec extends ActiveJDBCTest {
 
         User u = User.findById(1);
         String json = u.toJson(true, "email", "last_name");
-        JsonHelper.readTree(json); // validate
+        JsonHelper.toJsonString(json); // validate
         the(json).shouldBeEqual("{\n" +
                 "  \"email\":\"mmonroe@yahoo.com\",\n" +
                 "  \"last_name\":\"Monroe\"\n" +
@@ -102,15 +104,15 @@ public class ToJsonSpec extends ActiveJDBCTest {
         LazyList<User> personList = User.findAll().orderBy("id").include(Address.class);
 
         String json = personList.toJson(false);
-        JsonHelper.readTree(json); // validate
+        JsonHelper.toJsonString(json); // validate
     }
 
     @Test
     public void shouldEscapeDoubleQuote() {
         Page p = new Page();
         p.set("description", "bad \"/description\"");
-        JsonNode node = JsonHelper.readTree(p.toJson(true));
-        a(node.get("description").toString()).shouldBeEqual("\"bad \\\"/description\\\"\"");
+        Map map = JsonHelper.toMap(p.toJson(true));
+        a(map.get("description").toString()).shouldBeEqual("bad \"/description\"");
 
         //ensure no NPE:
         p = new Page();
@@ -219,5 +221,14 @@ public class ToJsonSpec extends ActiveJDBCTest {
         List keyboards = (List) parents.get("keyboards");
         the(motherboards.size()).shouldBeEqual(1);
         the(keyboards.size()).shouldBeEqual(1);
+    }
+
+    @Test
+    public void shouldSanitizeJson() {
+
+        Person p = new Person();
+        p.set("name", Util.readResource("/bad.txt"));
+        Map m = JsonHelper.toMap(p.toJson(true));
+        a(m.get("name")).shouldBeEqual("bad\n\tfor\n\t\tJson");
     }
 }

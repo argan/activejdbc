@@ -15,6 +15,12 @@ limitations under the License.
 */
 package org.javalite.activejdbc;
 
+import org.javalite.activejdbc.connection_config.ConnectionDataSourceSpec;
+import org.javalite.activejdbc.connection_config.ConnectionJdbcSpec;
+import org.javalite.activejdbc.connection_config.ConnectionJndiSpec;
+import org.javalite.activejdbc.connection_config.ConnectionSpec;
+import org.javalite.activejdbc.logging.LogFilter;
+import org.javalite.activejdbc.logging.LogLevel;
 import org.javalite.common.Convert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,15 +85,8 @@ public class DB implements Closeable{
      * @param user user name.
      * @param password password.
      */
-    public void open(String driver, String url, String user, String password) {
-        checkExistingConnection(name);
-        try {
-            Class.forName(driver);
-            Connection connection = DriverManager.getConnection(url, user, password);
-            ConnectionsAccess.attach(name, connection, url);
-        } catch (Exception e) {
-            throw new InitException("Failed to connect to JDBC URL: " + url, e);
-        }
+    public DB open(String driver, String url, String user, String password) {
+        return open(driver, url, user, password, null);
     }
 
     /**
@@ -97,12 +96,20 @@ public class DB implements Closeable{
      * @param url JDBC URL
      * @param props connection properties
      */
-    public void open(String driver, String url, Properties props) {
+    public DB open(String driver, String url, Properties props) {
+        return open(driver, url, null, null, props);
+    }
+
+    private DB open(String driver, String url, String user, String password, Properties properties){
         checkExistingConnection(name);
         try {
             Class.forName(driver);
-            Connection connection = DriverManager.getConnection(url, props);
+            Connection connection;
+            connection = properties == null ?  DriverManager.getConnection(url, user, password)
+                    : DriverManager.getConnection(url, properties);
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Opened connection: " + connection);
             ConnectionsAccess.attach(name, connection, url);
+            return this;
         } catch (Exception e) {
             throw new InitException("Failed to connect to JDBC URL: " + url, e);
         }
@@ -114,13 +121,15 @@ public class DB implements Closeable{
      *
      * @param jndiName name of a configured data source.
      */
-    public void open(String jndiName) {
+    public DB open(String jndiName) {
         checkExistingConnection(name);
         try {
             Context ctx = new InitialContext();
             DataSource ds = (DataSource) ctx.lookup(jndiName);
             Connection connection = ds.getConnection();
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Opened connection: " + connection);
             ConnectionsAccess.attach(name, connection, jndiName);
+            return this;
         } catch (Exception e) {
             throw new InitException("Failed to connect to JNDI name: " + jndiName, e);
         }
@@ -138,14 +147,14 @@ public class DB implements Closeable{
      *
      * @see Configuration#getEnvironment()
      */
-    public void open(){
+    public DB open(){
         Configuration config = Registry.instance().getConfiguration();
         ConnectionSpec spec = config.getCurrentConnectionSpec();
         if(spec == null){
             throw new DBException("Could not find configuration in a property file for environment: " + config.getEnvironment() +
                     ". Are you sure you have a database.properties file configured?");
         }
-        open(spec);
+        return open(spec);
     }
 
     /**
@@ -172,7 +181,7 @@ public class DB implements Closeable{
             ConnectionsAccess.detach(name); // let's free the thread from connection
             StatementCache.instance().cleanStatementCache(connection);
         } catch (DBException e) {
-            LOGGER.warn("Could not close connection! MUST INVESTIGATE POTENTIAL CONNECTION LEAK!", e);
+            LogFilter.log(LOGGER, LogLevel.ERROR, "Could not close connection! MUST INVESTIGATE POTENTIAL CONNECTION LEAK!", e);
         }
         return connection;
     }
@@ -182,11 +191,13 @@ public class DB implements Closeable{
      *
      * @param datasource datasource will be used to acquire a connection.
      */
-    public void open(DataSource datasource) {
+    public DB open(DataSource datasource) {
         checkExistingConnection(name);
         try {
             Connection connection = datasource.getConnection();
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Opened connection: " + connection);
             ConnectionsAccess.attach(name, connection, datasource.toString());
+            return this;
         } catch (SQLException e) {
             throw new InitException(e);
         }
@@ -200,14 +211,16 @@ public class DB implements Closeable{
      * @param jndiName name of JNDI data source.
      * @param jndiProperties JNDI properties
      */
-    public void open(String jndiName, Properties jndiProperties) {
+    public DB open(String jndiName, Properties jndiProperties) {
         checkExistingConnection(name);
         try {
             Context ctx = new InitialContext(jndiProperties);
             DataSource ds = (DataSource) ctx.lookup(jndiName);
             Connection connection = ds.getConnection();
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Opened connection: " + connection);
             ConnectionsAccess.attach(name, connection,
                     jndiProperties.contains("url") ? jndiProperties.getProperty("url") : jndiName);
+            return this;
         } catch (Exception e) {
             throw new InitException("Failed to connect to JNDI name: " + jndiName, e);
         }
@@ -219,12 +232,14 @@ public class DB implements Closeable{
      *
      * @param spec specification for a JDBC connection.
      */
-    public void open(ConnectionSpec spec) {
+    public DB open(ConnectionSpec spec) {
         checkExistingConnection(name);
         if (spec instanceof ConnectionJdbcSpec) {
-            openJdbc((ConnectionJdbcSpec) spec);
-        } else if(spec instanceof ConnectionJndiSpec) {
-            openJndi((ConnectionJndiSpec) spec);
+            return openJdbc((ConnectionJdbcSpec) spec);
+        } else if (spec instanceof ConnectionJndiSpec) {
+            return openJndi((ConnectionJndiSpec) spec);
+        } else if (spec instanceof ConnectionDataSourceSpec) {
+            return openDataSource((ConnectionDataSourceSpec) spec);
         } else {
             throw new IllegalArgumentException("this spec not supported: " + spec.getClass());
         }
@@ -242,12 +257,12 @@ public class DB implements Closeable{
      *
      * @param spec specification for a JDBC connection.
      */
-    private void openJdbc(ConnectionJdbcSpec spec) {
+    private DB openJdbc(ConnectionJdbcSpec spec) {
 
         if(spec.getProps()!= null){
-            open(spec.getDriver(), spec.getUrl(), spec.getProps());
+            return open(spec.getDriver(), spec.getUrl(), spec.getProps());
         }else{
-            open(spec.getDriver(), spec.getUrl(), spec.getUser(), spec.getPassword());
+            return open(spec.getDriver(), spec.getUrl(), spec.getUser(), spec.getPassword());
         }
     }
 
@@ -256,12 +271,16 @@ public class DB implements Closeable{
      *
      * @param spec specification for a JDBC connection.
      */
-    private void openJndi(ConnectionJndiSpec spec) {
+    private DB openJndi(ConnectionJndiSpec spec) {
         if(spec.getContext() != null){
-            openContext(spec.getContext(), spec.getDataSourceJndiName());
+            return openContext(spec.getContext(), spec.getDataSourceJndiName());
         }else{
-            open(spec.getDataSourceJndiName());
+            return open(spec.getDataSourceJndiName());
         }
+    }
+
+    private DB openDataSource(ConnectionDataSourceSpec spec) {
+        return open(spec.getDataSource());
     }
 
     /**
@@ -270,11 +289,13 @@ public class DB implements Closeable{
      * @param context context.
      * @param jndiName JNDI name.
      */
-    private void openContext(InitialContext context, String jndiName) {
+    private DB openContext(InitialContext context, String jndiName) {
         try {
             DataSource ds = (DataSource) context.lookup(jndiName);
             Connection connection = ds.getConnection();
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Opened connection: " + connection);
             ConnectionsAccess.attach(name, connection, jndiName);
+            return this;
         } catch (Exception e) {
             throw new InitException("Failed to connect to JNDI name: " + jndiName, e);
         }
@@ -300,7 +321,7 @@ public class DB implements Closeable{
             }
             StatementCache.instance().cleanStatementCache(connection);
             connection.close();
-            LogFilter.log(LOGGER, "Closed connection: {}", connection);
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Closed connection: {}", connection);
         } catch (Exception e) {
             if (!suppressWarning) {
                 LOGGER.warn("Could not close connection! MUST INVESTIGATE POTENTIAL CONNECTION LEAK!", e);
@@ -429,7 +450,7 @@ public class DB implements Closeable{
         PreparedStatement ps = null;
         ResultSet rs = null;
         try {
-            List results = new ArrayList();
+            List<Object> results = new ArrayList<>();
             long start = System.currentTimeMillis();
             ps = connection().prepareStatement(query);
             setParameters(ps, params);
@@ -622,7 +643,7 @@ public class DB implements Closeable{
             throw new IllegalArgumentException("this method is only for inserts");
 
         long start = System.currentTimeMillis();
-        PreparedStatement ps = null;
+        PreparedStatement ps;
         try {
             Connection connection = connection();
             ps = StatementCache.instance().getPreparedStatement(connection, query);
@@ -642,9 +663,7 @@ public class DB implements Closeable{
                             blob.setBytes(1, bytes);
                             ps.setBlob(index, blob);
                         }
-                    } catch (AbstractMethodError e) {// net.sourceforge.jtds.jdbc.ConnectionJDBC2.createBlob is abstract :)
-                        ps.setObject(index, param);
-                    } catch (SQLException e) {
+                    } catch (AbstractMethodError | SQLException e) {// net.sourceforge.jtds.jdbc.ConnectionJDBC2.createBlob is abstract :)
                         ps.setObject(index, param);
                     }
                 } else {
@@ -695,7 +714,7 @@ public class DB implements Closeable{
                 throw new DBException("Cannot open transaction, connection '" + name + "' not available");
             }
             c.setAutoCommit(false);
-            LogFilter.log(LOGGER, "Transaction opened");
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Transaction opened");
         } catch (SQLException ex) {
             throw new DBException(ex.getMessage(), ex);
         }
@@ -712,7 +731,7 @@ public class DB implements Closeable{
                 throw new DBException("Cannot commit transaction, connection '" + name + "' not available");
             }
             c.commit();
-            LogFilter.log(LOGGER, "Transaction committed");
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Transaction committed");
         } catch (SQLException ex) {
             throw new DBException(ex.getMessage(), ex);
         }
@@ -728,7 +747,7 @@ public class DB implements Closeable{
                 throw new DBException("Cannot rollback transaction, connection '" + name + "' not available");
             }
             c.rollback();
-            LogFilter.log(LOGGER, "Transaction rolled back");
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Transaction rolled back");
         } catch (SQLException ex) {
             throw new DBException(ex.getMessage(), ex);
         }

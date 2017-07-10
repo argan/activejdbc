@@ -22,12 +22,15 @@ import org.javalite.activejdbc.conversion.BlankToNullConverter;
 import org.javalite.activejdbc.conversion.Converter;
 import org.javalite.activejdbc.conversion.ZeroToNullConverter;
 import org.javalite.activejdbc.dialects.Dialect;
+import org.javalite.activejdbc.logging.LogFilter;
+import org.javalite.activejdbc.logging.LogLevel;
 import org.javalite.activejdbc.validation.NumericValidationBuilder;
 import org.javalite.activejdbc.validation.ValidationBuilder;
 import org.javalite.activejdbc.validation.ValidationException;
 import org.javalite.activejdbc.validation.Validator;
 import org.javalite.common.Convert;
 import org.javalite.common.Escape;
+import org.javalite.common.JsonHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -604,38 +607,61 @@ public abstract class Model extends CallbackSupport implements Externalizable {
 
 
     private void deleteJoinsForManyToMany() {
-        List<? extends Association> associations = metaModelLocal.getManyToManyAssociations(Collections.<Association>emptyList());
-        for (Association association : associations) {
-            String join = ((Many2ManyAssociation)association).getJoin();
-            String sourceFK = ((Many2ManyAssociation)association).getSourceFkName();
-            new DB(metaModelLocal.getDbName()).exec("DELETE FROM " + join + " WHERE " + sourceFK + " = ?", getId());
+        List<? extends Many2ManyAssociation> associations = metaModelLocal.getManyToManyAssociations(Collections.<Association>emptyList());
+        for (Many2ManyAssociation association : associations) {
+            deleteManyToManyLinks(association);
         }
     }
+
+    /**
+     * Deletes all records from a join table related to this model.
+     *
+     * @param association association  to another table.
+     */
+    private void deleteManyToManyLinks(Many2ManyAssociation association){
+        String join = association.getJoin();
+        String sourceFK = association.getSourceFkName();
+        new DB(metaModelLocal.getDbName()).exec("DELETE FROM " + join + " WHERE " + sourceFK + " = ?", getId());
+    }
+
 
     private void deleteOne2ManyChildrenShallow() {
         List<OneToManyAssociation> childAssociations = metaModelLocal.getOneToManyAssociations(Collections.<Association>emptyList());
         for (OneToManyAssociation association : childAssociations) {
-            String targetTable = metaModelOf(association.getTargetClass()).getTableName();
-            new DB(metaModelLocal.getDbName()).exec("DELETE FROM " + targetTable + " WHERE " + association.getFkName() + " = ?", getId());
+            deleteOne2ManyChildrenShallow(association);
         }
+    }
+
+    /**
+     * Deletes immediate children.
+     */
+    private void deleteOne2ManyChildrenShallow(OneToManyAssociation association){
+        String targetTable = metaModelOf(association.getTargetClass()).getTableName();
+        new DB(metaModelLocal.getDbName()).exec("DELETE FROM " + targetTable + " WHERE " + association.getFkName() + " = ?", getId());
     }
 
     private void deletePolymorphicChildrenShallow() {
         List<OneToManyPolymorphicAssociation> polymorphics = metaModelLocal.getPolymorphicAssociations(new ArrayList<Association>());
         for (OneToManyPolymorphicAssociation association : polymorphics) {
-            String targetTable = metaModelOf(association.getTargetClass()).getTableName();
-            String parentType = association.getTypeLabel();
-            new DB(metaModelLocal.getDbName()).exec("DELETE FROM " + targetTable + " WHERE parent_id = ? AND parent_type = ?", getId(), parentType);
+            deletePolymorphicChildrenShallow(association);
         }
     }
 
+    /**
+     * Deletes immediate polymorphic children
+     */
+    private void deletePolymorphicChildrenShallow(OneToManyPolymorphicAssociation association){
+        String targetTable = metaModelOf(association.getTargetClass()).getTableName();
+        String parentType = association.getTypeLabel();
+        new DB(metaModelLocal.getDbName()).exec("DELETE FROM " + targetTable + " WHERE parent_id = ? AND parent_type = ?", getId(), parentType);
+    }
 
     private void deleteChildrenDeep(List<? extends Association> childAssociations){
         for (Association association : childAssociations) {
             String targetTableName = metaModelOf(association.getTargetClass()).getTableName();
             Class c = Registry.instance().getModelClass(targetTableName, false);
             if(c == null){// this model is probably not defined as a class, but the table exists!
-                LOGGER.error("ActiveJDBC WARNING: failed to find a model class for: {}, maybe model is not defined for this table?"
+                LogFilter.log(LOGGER, LogLevel.ERROR, "ActiveJDBC WARNING: failed to find a model class for: {}, maybe model is not defined for this table?"
                         + " There might be a risk of running into integrity constrain violation if this model is not defined.",
                         targetTableName);
             }
@@ -644,6 +670,32 @@ public abstract class Model extends CallbackSupport implements Externalizable {
                 for (Model model : dependencies) {
                     model.deleteCascade();
                 }
+            }
+        }
+    }
+
+    /**
+     * Deletes immediate children (does not walk the dependency tree).
+     * If you have integrity constraints in the DB that are not accounted
+     * by this call, you  will get DB exceptions.
+     * <p>
+     * <h4>One to many and polymorphic associations</h4>
+     * Deletes all child records.
+     * <h4>Many to many associations</h4>
+     * Deletes links in a join table. Nothing else is deleted.
+     * </p>
+     *
+     * @param clazz type of a child to delete
+     */
+    public <T extends Model> void deleteChildrenShallow(Class<T> clazz) {
+        List<Association> associations = metaModelLocal.getAssociationsForTarget(clazz);
+        for (Association association : associations) {
+            if (association instanceof OneToManyAssociation) {
+                deleteOne2ManyChildrenShallow((OneToManyAssociation) association);
+            }else if(association instanceof Many2ManyAssociation){
+                deleteManyToManyLinks((Many2ManyAssociation) association);
+            }else if(association instanceof OneToManyPolymorphicAssociation){
+                deletePolymorphicChildrenShallow((OneToManyPolymorphicAssociation) association);
             }
         }
     }
@@ -966,16 +1018,16 @@ public abstract class Model extends CallbackSupport implements Externalizable {
             if (pretty) { sb.append("\n  ").append(indent); }
             String name = names[i];
             sb.append('"').append(name).append("\":");
-            Object v = attributes.get(name);
-            if (v == null) {
+            Object attribute = attributes.get(name);
+            if (attribute == null) {
                 sb.append("null");
-            } else if (v instanceof Number || v instanceof Boolean) {
-                sb.append(v);
-            } else if (v instanceof Date) {
-                sb.append('"').append(Convert.toIsoString((Date) v)).append('"');
+            } else if (attribute instanceof Number || attribute instanceof Boolean) {
+                sb.append(attribute);
+            } else if (attribute instanceof Date) {
+                sb.append('"').append(Convert.toIsoString((Date) attribute)).append('"');
             } else {
                 sb.append('"');
-                Escape.json(sb, Convert.toString(v));
+                sb.append(JsonHelper.sanitize(Convert.toString(attribute)));
                 sb.append('"');
             }
         }
@@ -1127,7 +1179,7 @@ public abstract class Model extends CallbackSupport implements Externalizable {
         }
 
         if (fkValue == null) {
-            LOGGER.debug("Attribute: {} is null, cannot determine parent. Child record: {}", fkName, this);
+            LogFilter.log(LOGGER, LogLevel.DEBUG, "Attribute: {} is null, cannot determine parent. Child record: {}", fkName, this);
             return null;
         }
 
@@ -2461,6 +2513,17 @@ public abstract class Model extends CallbackSupport implements Externalizable {
         }
     }
 
+    /**
+     * Convenience method. Calls {@link #add(Model)} one at the time for each member of the list.
+     * All rules of the {@link #add(Model)} method apply.
+     *
+     * @param models list of model instances to add to this one.
+     */
+    public <T extends Model>  void addModels(List<T> models){
+        for (T model : models) {
+            add(model);
+        }
+    }
 
     /**
      * Removes associated child from this instance. The child model should be either in belongs to association (including polymorphic) to this model

@@ -16,6 +16,8 @@ limitations under the License.
 package org.javalite.activejdbc;
 
 import org.javalite.activejdbc.associations.Many2ManyAssociation;
+import org.javalite.activejdbc.logging.LogFilter;
+import org.javalite.activejdbc.logging.LogLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,24 +31,24 @@ class MetaModels {
     private static final Logger LOGGER = LoggerFactory.getLogger(MetaModels.class);
 
     private final Map<String, MetaModel> metaModelsByTableName = new CaseInsensitiveMap<>();
-    private final Map<Class<? extends Model>, MetaModel> metaModelsByClass = new HashMap<>();
+    private final Map<String, MetaModel> metaModelsByClassName = new HashMap<>();
     //these are all many to many associations across all models.
     private final List<Many2ManyAssociation> many2ManyAssociations = new ArrayList<>();
 
     void addMetaModel(MetaModel mm, Class<? extends Model> modelClass) {
-        Object o = metaModelsByClass.put(modelClass, mm);
+        Object o = metaModelsByClassName.put(modelClass.getName(), mm);
         if (o != null) {
-            LOGGER.warn("Double-register: {}: {}", modelClass, o);
+            LogFilter.log(LOGGER, LogLevel.WARNING, "Double-register: {}: {}", modelClass, o);
         }
         o = metaModelsByTableName.put(mm.getTableName(), mm);
         many2ManyAssociations.addAll(mm.getManyToManyAssociations(Collections.<Association>emptyList()));
         if (o != null) {
-            LOGGER.warn("Double-register: {}: {}", mm.getTableName(), o);
+            LogFilter.log(LOGGER, LogLevel.WARNING, "Double-register: {}: {}", mm.getTableName(), o);
         }
     }
 
     MetaModel getMetaModel(Class<? extends Model> modelClass) {
-        return metaModelsByClass.get(modelClass);
+        return metaModelsByClassName.get(modelClass.getName());
     }
 
     MetaModel getMetaModel(String tableName) {
@@ -69,8 +71,8 @@ class MetaModels {
     }
 
     String getTableName(Class<? extends Model> modelClass) {
-        MetaModel mm = metaModelsByClass.get(modelClass);
-        return mm == null ? null : mm.getTableName();
+        return metaModelsByClassName.containsKey(modelClass.getName())?
+            metaModelsByClassName.get(modelClass.getName()).getTableName():null;
     }
 
     public void setColumnMetadata(String table, Map<String, ColumnMetadata> metaParams) {
